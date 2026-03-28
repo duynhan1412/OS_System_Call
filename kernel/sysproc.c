@@ -5,6 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -90,4 +91,25 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_sysinfo(void)
+{
+  uint64 addr;
+  struct sysinfo info;
+
+  // Gọi trực tiếp argaddr, không dùng if() < 0 nữa
+  argaddr(0, &addr);
+
+  // Thu thập dữ liệu
+  info.freemem = count_free_mem();
+  info.nproc = count_used_procs();
+  info.nopenfiles = count_open_files();
+
+  // Dùng copyout để trả dữ liệu về user space
+  if(copyout(myproc()->pagetable, addr, (char *)&info, sizeof(info)) < 0)
+    return -1;
+
+  return 0;
 }

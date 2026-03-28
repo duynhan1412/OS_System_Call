@@ -26,6 +26,7 @@ void            consputc(int);
 int             exec(char*, char**);
 
 // file.c
+uint64          count_open_files(void);
 struct file*    filealloc(void);
 void            fileclose(struct file*);
 struct file*    filedup(struct file*);
@@ -60,6 +61,7 @@ void            ramdiskintr(void);
 void            ramdiskrw(struct buf*);
 
 // kalloc.c
+uint64          count_free_mem(void);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
@@ -82,6 +84,7 @@ void            panic(char*) __attribute__((noreturn));
 void            printfinit(void);
 
 // proc.c
+uint64          count_used_procs(void);
 int             cpuid(void);
 void            exit(int);
 int             fork(void);
