@@ -110,6 +110,15 @@ sys_sysinfo(void)
   // Dùng copyout để trả dữ liệu về user space
   if(copyout(myproc()->pagetable, addr, (char *)&info, sizeof(info)) < 0)
     return -1;
+    
+  return 0;
+}
 
+uint64
+sys_trace(void)
+{
+  int mask;
+  argint(0, &mask);
+  myproc()->trace_mask = mask;
   return 0;
 }

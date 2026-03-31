@@ -44,3 +44,4 @@ void free(void*);
 
 struct sysinfo;
 int sysinfo(struct sysinfo *);
+int trace(int);
