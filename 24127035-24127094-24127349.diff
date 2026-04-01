@@ -1,0 +1,458 @@
+diff --git a/Makefile b/Makefile
+index 74e454f..bedac12 100644
+--- a/Makefile
++++ b/Makefile
+@@ -194,6 +194,8 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
++	$U/_sysinfotest\
++	$U/_trace\
+ 
+ 
+ 
+diff --git a/kernel/defs.h b/kernel/defs.h
+index d1b6bb9..3b6dc51 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -26,6 +26,7 @@ void            consputc(int);
+ int             exec(char*, char**);
+ 
+ // file.c
++uint64          count_open_files(void);
+ struct file*    filealloc(void);
+ void            fileclose(struct file*);
+ struct file*    filedup(struct file*);
+@@ -60,6 +61,7 @@ void            ramdiskintr(void);
+ void            ramdiskrw(struct buf*);
+ 
+ // kalloc.c
++uint64          count_free_mem(void);
+ void*           kalloc(void);
+ void            kfree(void *);
+ void            kinit(void);
+@@ -82,6 +84,7 @@ void            panic(char*) __attribute__((noreturn));
+ void            printfinit(void);
+ 
+ // proc.c
++uint64          count_used_procs(void);
+ int             cpuid(void);
+ void            exit(int);
+ int             fork(void);
+diff --git a/kernel/file.c b/kernel/file.c
+index 25fa226..11de79f 100644
+--- a/kernel/file.c
++++ b/kernel/file.c
+@@ -180,3 +180,19 @@ filewrite(struct file *f, uint64 addr, int n)
+   return ret;
+ }
+ 
++uint64
++count_open_files(void)
++{
++  struct file *f;
++  uint64 count = 0;
++  
++  acquire(&ftable.lock);
++  for(f = ftable.file; f < ftable.file + NFILE; f++){
++    if(f->ref > 0){ // Tham chiếu > 0 tức là đang có người mở
++      count++;
++    }
++  }
++  release(&ftable.lock);
++  return count;
++}
++
+diff --git a/kernel/kalloc.c b/kernel/kalloc.c
+index 0699e7e..8a8b7c1 100644
+--- a/kernel/kalloc.c
++++ b/kernel/kalloc.c
+@@ -80,3 +80,20 @@ kalloc(void)
+     memset((char*)r, 5, PGSIZE); // fill with junk
+   return (void*)r;
+ }
++
++uint64
++count_free_mem(void)
++{
++  struct run *r;
++  uint64 count = 0;
++  
++  acquire(&kmem.lock);
++  r = kmem.freelist;
++  while(r){
++    count += PGSIZE;
++    r = r->next;
++  }
++  release(&kmem.lock);
++  
++  return count;
++}
+diff --git a/kernel/param.h b/kernel/param.h
+index 80ec6d3..07e6f17 100644
+--- a/kernel/param.h
++++ b/kernel/param.h
+@@ -1,4 +1,8 @@
+-#define NPROC        64  // maximum number of processes
++#ifdef LAB_FS
++#define NPROC        10  // maximum number of processes
++#else
++#define NPROC        64  // maximum number of processes (speedsup bigfile)
++#endif
+ #define NCPU          8  // maximum number of CPUs
+ #define NOFILE       16  // open files per process
+ #define NFILE       100  // open files per system
+@@ -9,7 +13,21 @@
+ #define MAXOPBLOCKS  10  // max # of blocks any FS op writes
+ #define LOGSIZE      (MAXOPBLOCKS*3)  // max data blocks in on-disk log
+ #define NBUF         (MAXOPBLOCKS*3)  // size of disk block cache
+-#define FSSIZE       2000  // size of file system in blocks
++#ifdef LAB_FS
++#define FSSIZE       200000  // size of file system in blocks
++#else
++#ifdef LAB_LOCK
++#define FSSIZE       10000  // size of file system in blocks
++#else
++#define FSSIZE       2000   // size of file system in blocks
++#endif
++#endif
+ #define MAXPATH      128   // maximum file path name
++
++#ifdef LAB_UTIL
++#define USERSTACK    2     // user stack pages
++#else
+ #define USERSTACK    1     // user stack pages
++#endif
++
+ 
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 130d9ce..334044d 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -124,6 +124,7 @@ allocproc(void)
+ found:
+   p->pid = allocpid();
+   p->state = USED;
++  p->trace_mask = 0;
+ 
+   // Allocate a trapframe page.
+   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+@@ -169,6 +170,7 @@ freeproc(struct proc *p)
+   p->killed = 0;
+   p->xstate = 0;
+   p->state = UNUSED;
++  p->trace_mask = 0;
+ }
+ 
+ // Create a user page table for a given process, with no user memory,
+@@ -302,6 +304,9 @@ fork(void)
+   // Cause fork to return 0 in the child.
+   np->trapframe->a0 = 0;
+ 
++  // copy trace mask.
++  np->trace_mask = p->trace_mask;
++  
+   // increment reference counts on open file descriptors.
+   for(i = 0; i < NOFILE; i++)
+     if(p->ofile[i])
+@@ -693,3 +698,18 @@ procdump(void)
+     printf("\n");
+   }
+ }
++uint64
++count_used_procs(void)
++{
++  struct proc *p;
++  uint64 count = 0;
++  
++  for(p = proc; p < &proc[NPROC]; p++){
++    acquire(&p->lock);
++    if(p->state != UNUSED) { // Nếu trạng thái khác UNUSED thì đếm
++      count++;
++    }
++    release(&p->lock);
++  }
++  return count;
++}
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..fbea22f 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -90,7 +90,8 @@ struct proc {
+   void *chan;                  // If non-zero, sleeping on chan
+   int killed;                  // If non-zero, have been killed
+   int xstate;                  // Exit status to be returned to parent's wait
+-  int pid;                     // Process ID
++  int pid;        
++  int trace_mask;       
+ 
+   // wait_lock must be held when using this:
+   struct proc *parent;         // Parent process
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index ed65409..ce493c9 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,8 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_sysinfo(void);
++extern uint64 sys_trace(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +128,33 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_sysinfo] sys_sysinfo,
++[SYS_trace]   sys_trace,
++};
++
++static char *syscallnames[] = {
++[SYS_fork]    "fork",
++[SYS_exit]    "exit",
++[SYS_wait]    "wait",
++[SYS_pipe]    "pipe",
++[SYS_read]    "read",
++[SYS_kill]    "kill",
++[SYS_exec]    "exec",
++[SYS_fstat]   "fstat",
++[SYS_chdir]   "chdir",
++[SYS_dup]     "dup",
++[SYS_getpid]  "getpid",
++[SYS_sbrk]    "sbrk",
++[SYS_sleep]   "sleep",
++[SYS_uptime]  "uptime",
++[SYS_open]    "open",
++[SYS_write]   "write",
++[SYS_mknod]   "mknod",
++[SYS_unlink]  "unlink",
++[SYS_link]    "link",
++[SYS_mkdir]   "mkdir",
++[SYS_close]   "close",
++[SYS_trace]   "trace",
+ };
+ 
+ void
+@@ -139,6 +168,10 @@ syscall(void)
+     // Use num to lookup the system call function for num, call it,
+     // and store its return value in p->trapframe->a0
+     p->trapframe->a0 = syscalls[num]();
++
++    if(p->trace_mask & (1 << num)) {
++      printf("syscall %s -> %ld\n", syscallnames[num], p->trapframe->a0);
++    }
+   } else {
+     printf("%d %s: unknown sys call %d\n",
+             p->pid, p->name, num);
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index bc5f356..0888563 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_sysinfo  22
++#define SYS_trace  23
+\ No newline at end of file
+diff --git a/kernel/sysinfo.h b/kernel/sysinfo.h
+new file mode 100644
+index 0000000..35fb3a8
+--- /dev/null
++++ b/kernel/sysinfo.h
+@@ -0,0 +1,10 @@
++#ifndef _SYSINFO_H_
++#define _SYSINFO_H_
++
++struct sysinfo {
++  uint64 freemem;   // Số byte RAM còn trống
++  uint64 nproc;     // Số tiến trình không ở trạng thái UNUSED
++  uint64 nopenfiles;// Số lượng file đang mở trên toàn hệ thống
++};
++
++#endif
+\ No newline at end of file
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 3b4d5bd..60ba6a7 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -5,6 +5,7 @@
+ #include "memlayout.h"
+ #include "spinlock.h"
+ #include "proc.h"
++#include "sysinfo.h"
+ 
+ uint64
+ sys_exit(void)
+@@ -91,3 +92,33 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_sysinfo(void)
++{
++  uint64 addr;
++  struct sysinfo info;
++
++  // Gọi trực tiếp argaddr, không dùng if() < 0 nữa
++  argaddr(0, &addr);
++
++  // Thu thập dữ liệu
++  info.freemem = count_free_mem();
++  info.nproc = count_used_procs();
++  info.nopenfiles = count_open_files();
++
++  // Dùng copyout để trả dữ liệu về user space
++  if(copyout(myproc()->pagetable, addr, (char *)&info, sizeof(info)) < 0)
++    return -1;
++    
++  return 0;
++}
++
++uint64
++sys_trace(void)
++{
++  int mask;
++  argint(0, &mask);
++  myproc()->trace_mask = mask;
++  return 0;
++}
+diff --git a/user/sysinfotest.c b/user/sysinfotest.c
+new file mode 100644
+index 0000000..1dd3437
+--- /dev/null
++++ b/user/sysinfotest.c
+@@ -0,0 +1,63 @@
++#include "kernel/param.h"
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "kernel/sysinfo.h"
++#include "user/user.h"
++
++int
++main(int argc, char *argv[])
++{
++  struct sysinfo info1, info2;
++
++  printf("=== BAT DAU TEST SYSINFO ===\n");
++
++  // --- LẦN 1: LẤY THÔNG SỐ BAN ĐẦU ---
++  if (sysinfo(&info1) < 0) {
++    printf("sysinfo failed\n");
++    exit(1);
++  }
++  printf("\n[1] TRANG THAI BAN DAU:\n");
++  // Ép kiểu (int) và dùng %d để phù hợp với printf của xv6
++  printf("    - RAM trong (Free mem): %d bytes\n", (int)info1.freemem);
++  printf("    - So tien trinh (nproc): %d\n", (int)info1.nproc);
++  printf("    - So file dang mo (nopenfiles): %d\n", (int)info1.nopenfiles);
++
++  // --- TẠO SỰ THAY ĐỔI TRONG HỆ THỐNG ---
++  printf("\n[*] Dang thuc hien: sbrk(10 pages), open(README), fork()...\n");
++  
++  sbrk(10 * 4096);           // Tiêu tốn RAM: 10 trang
++  int fd = open("README", 0); // Mở 1 file
++  int pid = fork();          // Tạo 1 tiến trình con
++
++  if (pid < 0) {
++    printf("fork failed\n");
++    exit(1);
++  }
++
++  if (pid == 0) {
++    // Tiến trình con ngủ 10 tick để chờ cha đo lường
++    sleep(10); 
++    exit(0);
++  } 
++  else {
++    // --- LẦN 2: LẤY LẠI THÔNG SỐ ĐỂ SO SÁNH ---
++    if (sysinfo(&info2) < 0) {
++      printf("sysinfo failed\n");
++      exit(1);
++    }
++    
++    printf("\n[2] TRANG THAI SAU KHI THAY DOI:\n");
++    printf("    - RAM trong: %d bytes (Da giam %d bytes)\n", 
++           (int)info2.freemem, (int)(info1.freemem - info2.freemem));
++    printf("    - So tien trinh: %d (Da tang %d)\n", 
++           (int)info2.nproc, (int)(info2.nproc - info1.nproc));
++    printf("    - So file dang mo: %d (Da tang %d)\n", 
++           (int)info2.nopenfiles, (int)(info2.nopenfiles - info1.nopenfiles));
++
++    wait(0);     // Đợi con chạy xong
++    close(fd);   // Đóng file
++  }
++
++  printf("\n=== KET THUC TEST ===\n");
++  exit(0);
++}
+\ No newline at end of file
+diff --git a/user/trace.c b/user/trace.c
+new file mode 100644
+index 0000000..64454ca
+--- /dev/null
++++ b/user/trace.c
+@@ -0,0 +1,37 @@
++#include "kernel/param.h"
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int
++main(int argc, char *argv[])
++{
++  int i;
++  char *nargv[MAXARG];
++
++  //check arguments
++  if(argc < 3 || (argv[1][0] < '0' || argv[1][0] > '9')){
++    fprintf(2, "Usage: %s mask command\n", argv[0]);
++    exit(1);
++  }
++
++  int mask = atoi(argv[1]);
++
++  // Call trace to set trace mask for current process
++  if (trace(mask) < 0) {
++    fprintf(2, "%s: trace failed\n", argv[0]);
++    exit(1);
++  }
++
++  // Prepare arguments for exec
++  for(i = 2; i < argc && i < MAXARG; i++){
++    nargv[i-2] = argv[i];
++  }
++  nargv[i-2] = 0; // Null-terminate the argument list
++
++  // Execute the command
++  exec(nargv[0], nargv);
++
++  fprintf(2, "exec %s failed\n", nargv[0]);
++  exit(1);
++}
+\ No newline at end of file
+diff --git a/user/user.h b/user/user.h
+index f16fe27..feac1bf 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -41,3 +41,7 @@ void *memcpy(void *, const void *, uint);
+ // umalloc.c
+ void* malloc(uint);
+ void free(void*);
++
++struct sysinfo;
++int sysinfo(struct sysinfo *);
++int trace(int);
+diff --git a/user/usys.pl b/user/usys.pl
+index 01e426e..2b91f10 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -36,3 +36,5 @@ entry("getpid");
+ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
++entry("sysinfo");
++entry("trace");
